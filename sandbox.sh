@@ -21,13 +21,14 @@ set -euo pipefail
 # FIXED CONFIG
 # =============================================================================
 DROPLET_NAME="devbox"
-REGION="sfo3"
+REGION="nyc2"
 SIZE="s-8vcpu-16gb-amd"
 IMAGE="ubuntu-24-04-x64"
 SSH_KEY="96:78:51:00:78:0b:86:30:47:b7:d0:01:a4:5a:ff:27"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_SCRIPT="$SCRIPT_DIR/setup.sh"
 GITHUB_KEY_FILE="$HOME/.sandbox-github-key"
+GITHUB_TOKEN_FILE="$HOME/.sandbox-github-token"
 ENV_FILE="$HOME/.sandbox-env"
 DO_TOKEN_FILE="$HOME/.sandbox-do-token"
 
@@ -98,9 +99,15 @@ ssh_retry_heredoc() {
 # =============================================================================
 REPO="${1:-}"
 
-[[ -n "$REPO" ]] || die "Usage: sandbox git@github.com:user/repo.git"
+[[ -n "$REPO" ]] || die "Usage: sandbox <repo-url>"
+
+# Convert SSH URL to HTTPS (PAT auth only works with HTTPS)
+if [[ "$REPO" == git@github.com:* ]]; then
+    REPO="https://github.com/${REPO#git@github.com:}"
+    REPO="${REPO%.git}.git"
+fi
 [[ -f "$SETUP_SCRIPT" ]] || die "Missing: $SETUP_SCRIPT"
-[[ -f "$GITHUB_KEY_FILE" ]] || die "Missing: $GITHUB_KEY_FILE (GitHub deploy key)"
+[[ -f "$GITHUB_TOKEN_FILE" ]] || die "Missing: $GITHUB_TOKEN_FILE (GitHub PAT - see README)"
 command -v doctl >/dev/null || die "doctl not installed. Run: brew install doctl"
 command -v jq >/dev/null || die "jq not installed. Run: brew install jq"
 
@@ -180,26 +187,16 @@ ssh_retry "echo '$DO_TOKEN' > /etc/self-destruct-token && chmod 600 /etc/self-de
 ssh_retry "systemctl enable --now self-destruct.timer"
 success "Self-destruct timer enabled (24 hours)"
 
-# Write GitHub deploy key (idempotent - overwrites if exists)
-GITHUB_KEY=$(cat "$GITHUB_KEY_FILE")
-ssh_retry_heredoc << EOFKEY
-mkdir -p /home/dev/.ssh
-cat > /home/dev/.ssh/id_ed25519 << 'KEY'
-$GITHUB_KEY
-KEY
-chmod 600 /home/dev/.ssh/id_ed25519
-cat > /home/dev/.ssh/config << 'CFG'
-Host github.com
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/id_ed25519
-  IdentitiesOnly yes
-  StrictHostKeyChecking no
-CFG
-chmod 600 /home/dev/.ssh/config
-chown -R dev:dev /home/dev/.ssh
-EOFKEY
-success "GitHub deploy key configured"
+# Configure GitHub PAT for HTTPS clones (idempotent - overwrites if exists)
+GITHUB_TOKEN=$(cat "$GITHUB_TOKEN_FILE" | tr -d '[:space:]')
+ssh_retry_heredoc << EOFGIT
+# Store PAT in git credential helper so clone/push works over HTTPS
+sudo -u dev git config --global credential.helper store
+echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > /home/dev/.git-credentials
+chmod 600 /home/dev/.git-credentials
+chown dev:dev /home/dev/.git-credentials
+EOFGIT
+success "GitHub PAT configured"
 
 # Set ANTHROPIC_API_KEY if provided (idempotent - check before adding)
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
